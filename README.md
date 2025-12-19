@@ -365,6 +365,73 @@ See [Configuration Guide](https://docs.claude-mem.ai/configuration) for details.
 
 ---
 
+## Git Sync (Fork Feature)
+
+> **Note**: This feature is only available in [this fork](https://github.com/lcalmsky/claude-mem). It enables database backup and cross-machine synchronization via Git.
+
+### Features
+
+- **Auto Sync**: Automatically pulls on session start, pushes on session end
+- **Idle Timeout**: Pushes after 10 minutes of inactivity (configurable)
+- **Manual Control**: Use `/mem-sync` skill or API endpoints
+- **Conflict Handling**: Detects diverged states and prompts for resolution
+
+### Installation (Fork Version)
+
+```bash
+# Remove existing installation (if any)
+rm -rf ~/.claude/plugins/marketplaces/thedotmack
+
+# Clone this fork
+git clone https://github.com/lcalmsky/claude-mem.git ~/.claude/plugins/marketplaces/thedotmack
+
+# Install and build
+cd ~/.claude/plugins/marketplaces/thedotmack
+npm install
+npm run build
+
+# Restart Claude Code
+```
+
+### Setup
+
+1. **Create a private Git repository** for backup (e.g., `claude-mem-backup`)
+
+2. **Configure remote URL:**
+   ```bash
+   curl -X POST -H 'Content-Type: application/json' \
+     -d '{"remoteUrl":"git@github.com:YOUR_USER/claude-mem-backup.git"}' \
+     http://127.0.0.1:37777/api/git-sync/configure
+   ```
+
+3. **Enable auto sync** in `~/.claude-mem/settings.json`:
+   ```json
+   {
+     "CLAUDE_MEM_GIT_REMOTE_URL": "git@github.com:YOUR_USER/claude-mem-backup.git",
+     "CLAUDE_MEM_GIT_AUTO_SYNC": "true",
+     "CLAUDE_MEM_GIT_IDLE_TIMEOUT_MIN": "10"
+   }
+   ```
+
+4. **Restart Claude Code**
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/git-sync/configure` | POST | Set remote URL |
+| `/api/git-sync/push` | POST | Push DB to remote |
+| `/api/git-sync/pull` | POST | Pull DB from remote |
+| `/api/git-sync/status` | GET | Check sync status |
+
+### Important Notes
+
+- **SSH key required**: Configure `~/.ssh/` for passwordless Git operations
+- **Single machine at a time**: SQLite binary can't be merged by Git. Always pull before starting work, push when done.
+- **Conflict resolution**: API returns `needsUserAction` when conflicts are detected
+
+---
+
 ## Development
 
 ```bash
