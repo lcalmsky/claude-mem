@@ -12,6 +12,7 @@ import { SessionStore } from '../sqlite/SessionStore.js';
 import { SessionSearch } from '../sqlite/SessionSearch.js';
 import { ChromaSync } from '../sync/ChromaSync.js';
 import { logger } from '../../utils/logger.js';
+import { existsSync, unlinkSync } from 'fs';
 import type { DBSession } from '../worker-types.js';
 
 export class DatabaseManager {
@@ -119,5 +120,25 @@ export class DatabaseManager {
    */
   markSessionComplete(sessionDbId: number): void {
     this.getSessionStore().markSessionCompleted(sessionDbId);
+  }
+
+  /**
+   * Safely backup database to a file using VACUUM INTO
+   * This creates a consistent snapshot even while the database is in use
+   */
+  async backupTo(destPath: string): Promise<void> {
+    if (!this.sessionStore) {
+      throw new Error('Database not initialized');
+    }
+
+    // Remove existing file if present (VACUUM INTO fails if file exists)
+    if (existsSync(destPath)) {
+      unlinkSync(destPath);
+    }
+
+    // VACUUM INTO creates a clean copy of the database
+    // It's safe to run while the database is in use
+    this.sessionStore.db.run(`VACUUM INTO '${destPath}'`);
+    logger.info('DB', 'Database backup completed', { destPath });
   }
 }

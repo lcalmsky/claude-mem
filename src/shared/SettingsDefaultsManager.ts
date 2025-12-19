@@ -37,6 +37,10 @@ export interface SettingsDefaults {
   // Feature Toggles
   CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: string;
   CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: string;
+  // Git Sync Configuration
+  CLAUDE_MEM_GIT_REMOTE_URL: string;
+  CLAUDE_MEM_GIT_AUTO_SYNC: string;
+  CLAUDE_MEM_GIT_IDLE_TIMEOUT_MIN: string;
 }
 
 export class SettingsDefaultsManager {
@@ -69,6 +73,10 @@ export class SettingsDefaultsManager {
     // Feature Toggles
     CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: 'true',
     CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: 'false',
+    // Git Sync Configuration
+    CLAUDE_MEM_GIT_REMOTE_URL: '',
+    CLAUDE_MEM_GIT_AUTO_SYNC: 'false',
+    CLAUDE_MEM_GIT_IDLE_TIMEOUT_MIN: '10',
   };
 
   /**

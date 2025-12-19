@@ -38,6 +38,8 @@ import { SessionRoutes } from './worker/http/routes/SessionRoutes.js';
 import { DataRoutes } from './worker/http/routes/DataRoutes.js';
 import { SearchRoutes } from './worker/http/routes/SearchRoutes.js';
 import { SettingsRoutes } from './worker/http/routes/SettingsRoutes.js';
+import { GitSyncRoutes } from './worker/http/routes/GitSyncRoutes.js';
+import { GitSyncManager } from './worker/GitSyncManager.js';
 
 export class WorkerService {
   private app: express.Application;
@@ -64,6 +66,10 @@ export class WorkerService {
   private dataRoutes: DataRoutes;
   private searchRoutes: SearchRoutes | null;
   private settingsRoutes: SettingsRoutes;
+  private gitSyncRoutes: GitSyncRoutes;
+
+  // Git sync manager
+  private gitSyncManager: GitSyncManager;
 
   // Initialization tracking
   private initializationComplete: Promise<void>;
@@ -97,6 +103,9 @@ export class WorkerService {
       version: '1.0.0'
     }, { capabilities: {} });
 
+    // Initialize git sync manager
+    this.gitSyncManager = new GitSyncManager();
+
     // Initialize route handlers (SearchRoutes will use MCP client initially, then switch to SearchManager after DB init)
     this.viewerRoutes = new ViewerRoutes(this.sseBroadcaster, this.dbManager, this.sessionManager);
     this.sessionRoutes = new SessionRoutes(this.sessionManager, this.dbManager, this.sdkAgent, this.sessionEventBroadcaster, this);
@@ -104,6 +113,7 @@ export class WorkerService {
     // SearchRoutes needs SearchManager which requires initialized DB - will be created in initializeBackground()
     this.searchRoutes = null;
     this.settingsRoutes = new SettingsRoutes(this.settingsManager);
+    this.gitSyncRoutes = new GitSyncRoutes(this.gitSyncManager);
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -115,6 +125,15 @@ export class WorkerService {
   private setupMiddleware(): void {
     const middlewares = createMiddleware(this.summarizeRequestBody.bind(this));
     middlewares.forEach(mw => this.app.use(mw));
+
+    // Activity tracking middleware for git sync idle detection
+    this.app.use((req, res, next) => {
+      // Record activity for all API requests (skip static files)
+      if (req.path.startsWith('/api/')) {
+        this.gitSyncManager.recordActivity();
+      }
+      next();
+    });
   }
 
   /**
@@ -264,6 +283,7 @@ export class WorkerService {
     this.dataRoutes.setupRoutes(this.app);
     // searchRoutes is set up after database initialization in initializeBackground()
     this.settingsRoutes.setupRoutes(this.app);
+    this.gitSyncRoutes.setupRoutes(this.app);
 
     // Register early handler for /api/context/inject to avoid 404 during startup
     // This handler waits for initialization to complete before delegating to SearchRoutes
@@ -469,6 +489,24 @@ export class WorkerService {
       this.mcpReady = true;
       logger.success('WORKER', 'Connected to MCP server');
 
+      // Initialize git sync manager with DB callbacks
+      this.gitSyncManager.setDbCallbacks(
+        // onClose - for pull operations
+        async () => {
+          await this.dbManager.close();
+        },
+        // onReopen - after pull
+        async () => {
+          await this.dbManager.initialize();
+        },
+        // onBackup - safe backup using VACUUM INTO
+        async (destPath: string) => {
+          await this.dbManager.backupTo(destPath);
+        }
+      );
+      await this.gitSyncManager.initialize();
+      this.gitSyncManager.startIdleCheck();
+
       // Signal that initialization is complete
       this.initializationCompleteFlag = true;
       this.resolveInitialization();
@@ -549,6 +587,9 @@ export class WorkerService {
 
     // STEP 5: Close database connection (includes ChromaSync cleanup)
     await this.dbManager.close();
+
+    // STEP 5.5: Close git sync manager
+    await this.gitSyncManager.close();
 
     // STEP 6: Force kill any remaining child processes (Windows zombie port fix)
     if (childPids.length > 0) {

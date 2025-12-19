@@ -10,6 +10,8 @@
  */
 
 import { stdin } from 'process';
+import { join } from 'path';
+import { homedir } from 'os';
 import { createHookResponse } from './hook-response.js';
 import { logger } from '../utils/logger.js';
 import { ensureWorkerRunning, getWorkerPort } from '../shared/worker-utils.js';
@@ -17,6 +19,7 @@ import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { handleWorkerError } from '../shared/hook-error-handler.js';
 import { handleFetchError } from './shared/error-handler.js';
 import { extractLastMessage } from '../shared/transcript-parser.js';
+import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
 
 export interface StopInput {
   session_id: string;
@@ -96,6 +99,25 @@ async function summaryHook(input?: StopInput): Promise<void> {
       }
     } catch (error: any) {
       logger.warn('HOOK', 'Could not stop spinner', { error: error.message });
+    }
+
+    // Git auto sync push (fire-and-forget)
+    try {
+      const settingsPath = join(homedir(), '.claude-mem', 'settings.json');
+      const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
+
+      if (settings.CLAUDE_MEM_GIT_AUTO_SYNC === 'true' && settings.CLAUDE_MEM_GIT_REMOTE_URL) {
+        fetch(`http://127.0.0.1:${port}/api/git-sync/push`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: `Session end: ${session_id}` }),
+          signal: AbortSignal.timeout(5000)
+        }).catch(() => {
+          // Silently ignore errors - git sync is optional
+        });
+      }
+    } catch {
+      // Silently ignore settings read errors
     }
   }
 

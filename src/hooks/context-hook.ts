@@ -7,11 +7,14 @@
  */
 
 import { stdin } from "process";
+import { join } from "path";
+import { homedir } from "os";
 import { ensureWorkerRunning, getWorkerPort } from "../shared/worker-utils.js";
 import { HOOK_TIMEOUTS } from "../shared/hook-constants.js";
 import { handleWorkerError } from "../shared/hook-error-handler.js";
 import { handleFetchError } from "./shared/error-handler.js";
 import { getProjectName } from "../utils/project-name.js";
+import { SettingsDefaultsManager } from "../shared/SettingsDefaultsManager.js";
 
 export interface SessionStartInput {
   session_id: string;
@@ -27,6 +30,24 @@ async function contextHook(input?: SessionStartInput): Promise<string> {
   const cwd = input?.cwd ?? process.cwd();
   const project = getProjectName(cwd);
   const port = getWorkerPort();
+
+  // Check if git auto sync is enabled and trigger pull
+  try {
+    const settingsPath = join(homedir(), '.claude-mem', 'settings.json');
+    const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
+
+    if (settings.CLAUDE_MEM_GIT_AUTO_SYNC === 'true' && settings.CLAUDE_MEM_GIT_REMOTE_URL) {
+      // Fire-and-forget pull (don't wait for result, don't block context generation)
+      fetch(`http://127.0.0.1:${port}/api/git-sync/pull`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(5000)
+      }).catch(() => {
+        // Silently ignore errors - git sync is optional
+      });
+    }
+  } catch {
+    // Silently ignore settings read errors
+  }
 
   const url = `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(project)}`;
 
