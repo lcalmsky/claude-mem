@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, openSync, closeSync, constants } from 'fs';
 import { createWriteStream } from 'fs';
 import { join } from 'path';
 import { spawn, spawnSync } from 'child_process';
@@ -7,6 +7,7 @@ import { DATA_DIR } from '../../shared/paths.js';
 import { getBunPath, isBunAvailable } from '../../utils/bun-path.js';
 
 const PID_FILE = join(DATA_DIR, 'worker.pid');
+const LOCK_FILE = join(DATA_DIR, 'worker.lock');
 const LOG_DIR = join(DATA_DIR, 'logs');
 const MARKETPLACE_ROOT = join(homedir(), '.claude', 'plugins', 'marketplaces', 'thedotmack');
 
@@ -16,6 +17,9 @@ const HEALTH_CHECK_TIMEOUT_MS = 10000;
 const HEALTH_CHECK_INTERVAL_MS = 200;
 const HEALTH_CHECK_FETCH_TIMEOUT_MS = 1000;
 const PROCESS_EXIT_CHECK_INTERVAL_MS = 100;
+const LOCK_STALE_TIMEOUT_MS = 30000; // Lock is considered stale after 30 seconds
+const LOCK_RETRY_INTERVAL_MS = 100;
+const LOCK_MAX_RETRIES = 50; // 5 seconds max wait for lock
 
 interface PidInfo {
   pid: number;
@@ -24,7 +28,109 @@ interface PidInfo {
   version: string;
 }
 
+interface LockInfo {
+  pid: number;
+  timestamp: number;
+}
+
 export class ProcessManager {
+  /**
+   * Attempts to acquire an exclusive lock file using O_EXCL flag.
+   * This is atomic at the filesystem level and prevents race conditions.
+   * Returns true if lock acquired, false if another process holds it.
+   */
+  private static tryAcquireLock(): boolean {
+    mkdirSync(DATA_DIR, { recursive: true });
+
+    // Check for stale lock first
+    this.cleanStaleLock();
+
+    try {
+      // O_CREAT | O_EXCL | O_WRONLY - fails if file exists (atomic check-and-create)
+      const fd = openSync(LOCK_FILE, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+
+      // Write lock info
+      const lockInfo: LockInfo = {
+        pid: process.pid,
+        timestamp: Date.now()
+      };
+      writeFileSync(LOCK_FILE, JSON.stringify(lockInfo));
+      closeSync(fd);
+      return true;
+    } catch (error: unknown) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+        // Lock file exists, another process has the lock
+        return false;
+      }
+      // Other errors (permission, etc.) - treat as lock failure
+      return false;
+    }
+  }
+
+  /**
+   * Releases the lock file if we own it.
+   */
+  private static releaseLock(): void {
+    try {
+      const content = readFileSync(LOCK_FILE, 'utf-8');
+      const lockInfo: LockInfo = JSON.parse(content);
+
+      // Only release if we own the lock
+      if (lockInfo.pid === process.pid) {
+        unlinkSync(LOCK_FILE);
+      }
+    } catch {
+      // Lock file doesn't exist or is invalid - nothing to release
+    }
+  }
+
+  /**
+   * Cleans up stale locks from crashed processes.
+   */
+  private static cleanStaleLock(): void {
+    try {
+      if (!existsSync(LOCK_FILE)) return;
+
+      const content = readFileSync(LOCK_FILE, 'utf-8');
+      const lockInfo: LockInfo = JSON.parse(content);
+
+      // Check if lock is stale (too old)
+      if (Date.now() - lockInfo.timestamp > LOCK_STALE_TIMEOUT_MS) {
+        unlinkSync(LOCK_FILE);
+        return;
+      }
+
+      // Check if the process that holds the lock is still alive
+      try {
+        process.kill(lockInfo.pid, 0);
+        // Process is alive, lock is valid
+      } catch {
+        // Process is dead, remove stale lock
+        unlinkSync(LOCK_FILE);
+      }
+    } catch {
+      // Invalid lock file, remove it
+      try {
+        unlinkSync(LOCK_FILE);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  /**
+   * Waits to acquire the lock with retries.
+   */
+  private static async acquireLockWithRetry(): Promise<boolean> {
+    for (let i = 0; i < LOCK_MAX_RETRIES; i++) {
+      if (this.tryAcquireLock()) {
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, LOCK_RETRY_INTERVAL_MS));
+    }
+    return false;
+  }
+
   static async start(port: number): Promise<{ success: boolean; pid?: number; error?: string }> {
     // Validate port range
     if (isNaN(port) || port < 1024 || port > 65535) {
@@ -34,28 +140,51 @@ export class ProcessManager {
       };
     }
 
-    // Check if already running
+    // Quick check without lock - if already running, no need to acquire lock
     if (await this.isRunning()) {
       const info = this.getPidInfo();
       return { success: true, pid: info?.pid };
     }
 
-    // Ensure log directory exists
-    mkdirSync(LOG_DIR, { recursive: true });
-
-    // On Windows, use the wrapper script to solve zombie port problem
-    // On Unix, use the worker directly
-    const scriptName = process.platform === 'win32' ? 'worker-wrapper.cjs' : 'worker-service.cjs';
-    const workerScript = join(MARKETPLACE_ROOT, 'plugin', 'scripts', scriptName);
-
-    if (!existsSync(workerScript)) {
-      return { success: false, error: `Worker script not found at ${workerScript}` };
+    // Acquire lock for startup sequence
+    if (!await this.acquireLockWithRetry()) {
+      // Another process is starting the worker, wait for it
+      // Then check if worker is now running
+      await new Promise(resolve => setTimeout(resolve, HEALTH_CHECK_TIMEOUT_MS));
+      if (await this.isRunning()) {
+        const info = this.getPidInfo();
+        return { success: true, pid: info?.pid };
+      }
+      return { success: false, error: 'Failed to acquire startup lock and worker not running' };
     }
 
-    const logFile = this.getLogFilePath();
+    try {
+      // Double-check after acquiring lock (another process might have started it)
+      if (await this.isRunning()) {
+        const info = this.getPidInfo();
+        return { success: true, pid: info?.pid };
+      }
 
-    // Use Bun on all platforms with PowerShell workaround for Windows console popups
-    return this.startWithBun(workerScript, logFile, port);
+      // Ensure log directory exists
+      mkdirSync(LOG_DIR, { recursive: true });
+
+      // On Windows, use the wrapper script to solve zombie port problem
+      // On Unix, use the worker directly
+      const scriptName = process.platform === 'win32' ? 'worker-wrapper.cjs' : 'worker-service.cjs';
+      const workerScript = join(MARKETPLACE_ROOT, 'plugin', 'scripts', scriptName);
+
+      if (!existsSync(workerScript)) {
+        return { success: false, error: `Worker script not found at ${workerScript}` };
+      }
+
+      const logFile = this.getLogFilePath();
+
+      // Use Bun on all platforms with PowerShell workaround for Windows console popups
+      return await this.startWithBun(workerScript, logFile, port);
+    } finally {
+      // Always release lock after startup attempt (success or failure)
+      this.releaseLock();
+    }
   }
 
   private static isBunAvailable(): boolean {

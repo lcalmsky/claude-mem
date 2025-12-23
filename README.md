@@ -164,6 +164,15 @@ npx mintlify dev
 5. **mem-search Skill** - Natural language queries with progressive disclosure
 6. **Chroma Vector Database** - Hybrid semantic + keyword search for intelligent context retrieval
 
+**Multi-Session Architecture:**
+
+Claude-Mem uses a **singleton worker** architecture - all Claude Code sessions share a single worker process on port 37777. This provides:
+
+- **Session Isolation**: Each session is identified by unique `session_id`
+- **Race Condition Prevention**: Atomic file locking (`O_EXCL` flag) prevents duplicate worker startup
+- **Stale Lock Cleanup**: Dead process locks are automatically detected and removed
+- **Resource Efficiency**: Single worker serves all sessions, reducing memory footprint
+
 See [Architecture Overview](https://docs.claude-mem.ai/architecture/overview) for details.
 
 ---
@@ -248,6 +257,16 @@ See [Beta Features Documentation](https://docs.claude-mem.ai/beta-features) for 
 ---
 
 ## What's New
+
+**v7.4.1 - Race Condition Prevention:**
+- Atomic file locking for worker startup prevents duplicate workers
+- Stale lock detection and automatic cleanup for crashed processes
+- Zombie worker handling improved with proper cleanup
+
+**v7.4.0 - Git Sync (Fork Feature):**
+- Database backup and sync via Git repository
+- Auto-sync on session start/end with idle timeout push
+- Manual control via `/mem-sync` skill
 
 **v6.4.9 - Context Configuration Settings:**
 - 11 new settings for fine-grained control over context injection
@@ -467,6 +486,16 @@ If you're experiencing issues, describe the problem to Claude and the troublesho
 - No context appearing → `npm run test:context`
 - Database issues → `sqlite3 ~/.claude-mem/claude-mem.db "PRAGMA integrity_check;"`
 - Search not working → Check FTS5 tables exist
+- Zombie worker (process running but not responding) → Kill process and restart:
+  ```bash
+  pgrep -fl "bun.*worker" | awk '{print $1}' | xargs kill -9
+  cd ~/.claude/plugins/marketplaces/thedotmack && npm run worker:restart
+  ```
+- Slow Claude Code response → Check for zombie workers or stale locks:
+  ```bash
+  rm -f ~/.claude-mem/worker.lock
+  npm run worker:restart
+  ```
 
 See [Troubleshooting Guide](https://docs.claude-mem.ai/troubleshooting) for complete solutions.
 
